@@ -1,0 +1,16 @@
+kiteconnect==5.0.1
+tavily-python==0.3.3
+firecrawl-py
+langgraph==0.1.1
+langchain-core==0.2.22
+langchain-google-genai==1.0.8
+langchain-openai==0.1.17
+pandas==2.2.2
+numpy>=1.22.5,<2.0.0
+chromadb==0.5.4
+python-telegram-bot==21.4
+python-dotenv==1.0.1
+apscheduler==3.10.4
+RestrictedPython==7.1
+pyotp==2.9.0
+requests==2.32.3

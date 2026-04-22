@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  tradebot:
+    build: .
+    container_name: tradebot
+    restart: unless-stopped
+    volumes:
+      - ./kite_session.json:/app/kite_session.json
+      - ./trade_journal.db:/app/trade_journal.db
+      - ./chroma_db:/app/chroma_db
+      - ./.env:/app/.env
+    environment:
+      - TZ=Asia/Kolkata
