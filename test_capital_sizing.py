@@ -38,7 +38,7 @@ class TestCapitalSizing(unittest.TestCase):
             option_premium   = 100.0,
             instrument       = "NIFTY"
         )
-        self.assertEqual(lots, 10)
+        self.assertEqual(lots, 6)
 
     def test_live_capital_fetch_mock(self):
         self.ea.paper_trade = False

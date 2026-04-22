@@ -117,6 +117,8 @@ class Orchestrator:
         self.last_tick_eval_time  = 0
         self.last_nifty_price     = None
         self.streamer.tick_callback = self._on_market_tick
+        self.streamer.on_reconnect_sync = self._sync_broker_state
+
         self.last_options_analysis = {}
         self.last_fii_signal       = "NEUTRAL"
         self.last_confluence       = {}
@@ -511,6 +513,18 @@ class Orchestrator:
             return {}
 
     # ── System Management ─────────────────────────────────────────────────────
+
+
+    def _sync_broker_state(self):
+        """Re-fetches and syncs live positions from broker after a reconnect."""
+        try:
+            logger.info("🔄 [RECONCILIATION] Syncing broker state after WebSocket reconnect...")
+            broker_positions = self.execution_agent.get_live_positions_from_broker()
+            if broker_positions is not None:
+                self.position_manager.sync_with_broker(broker_positions)
+                logger.info(f"🔄 State Sync Complete. {len(self.position_manager.get_open_positions())} active.")
+        except Exception as e:
+            logger.error(f"Failed to sync broker state: {e}")
 
     def _on_market_tick(self, ticks):
         if not self._is_market_open(): return

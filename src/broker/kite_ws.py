@@ -63,6 +63,13 @@ class KiteStreamer:
         ws.set_mode(ws.MODE_FULL, tokens)
         logger.info(f"Subscribed to {len(tokens)} tokens: {tokens}")
 
+        # State Reconciliation: Re-fetch positions/orders on connect to sync missed fills
+        if hasattr(self, 'on_reconnect_sync') and self.on_reconnect_sync:
+            try:
+                self.on_reconnect_sync()
+            except Exception as e:
+                logger.error(f"State Reconciliation Failed: {e}")
+
     def on_close(self, ws, code, reason):
         logger.warning(f"WebSocket closed: {code} - {reason}")
         self.is_connected = False

@@ -10,7 +10,9 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 from src.agents.context_agent import ContextAgent
 
 class TestContextAnalysis(unittest.TestCase):
-    def setUp(self):
+    @patch('os.getenv')
+    def setUp(self, mock_getenv):
+        mock_getenv.return_value = "dummy_api_key"
         self.agent = ContextAgent()
         # Mock LLM and Fetcher
         self.agent.llm_fast = MagicMock()
