@@ -238,16 +238,20 @@ class RiskManager:
                                 instrument: str = "NIFTY", custom_margin_per_lot: float = None):
         """
         Calculates how many lots to trade based on available margin minus shadow margin.
+        Includes a dedicated hedge margin buffer.
         """
         # Deduct any pending trades that the broker hasn't accounted for yet
         with self._lock:
             shadow_total = sum(self._shadow_margins.values())
             eff_max_pos = self.max_position_size
             
-        effective_margin = available_margin - shadow_total
+        # Institutional Rule: Reserve 20% of capital strictly for Futures Hedging (Gamma Scalper)
+        hedge_buffer_pct = 0.20
+        usable_margin = available_margin * (1.0 - hedge_buffer_pct)
+        effective_margin = usable_margin - shadow_total
 
         if effective_margin <= 0:
-            logger.warning(f"Effective margin ₹{effective_margin:.2f} too low (Shadow: ₹{shadow_total:.2f})")
+            logger.warning(f"Effective margin ₹{effective_margin:.2f} too low (Total: ₹{available_margin:.2f}, Shadow: ₹{shadow_total:.2f})")
             return 0
             
         lot_size = self.get_lot_size(instrument)
@@ -258,7 +262,7 @@ class RiskManager:
         if margin_per_lot <= 0:
             return 0
 
-        # Based on test expectations: use 90% of effective margin, not 5%
+        # Based on test expectations: use 90% of the USABLE effective margin
         max_alloc = effective_margin * 0.90
         lots = int(max_alloc // margin_per_lot)
         

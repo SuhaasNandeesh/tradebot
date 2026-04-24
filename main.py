@@ -554,17 +554,41 @@ class Orchestrator:
         with open(pid_file, "w") as f: f.write(str(os.getpid()))
 
     def system_watchdog_job(self):
-        """Ensures the system isn't 'trading blind'."""
+        """Ensures the system isn't 'trading blind' by catching silent freezes."""
         try:
             logger.debug("💓 [HEARTBEAT] Starting system_watchdog_job...")
             if not self.streamer.is_connected: return
-            stall_duration = time.time() - self.streamer.last_tick_time
-            if self._is_market_open() and stall_duration > 20:
-                logger.critical(f"🚨 SYSTEM STALL: No ticks for {stall_duration:.0f}s. Reconnecting.")
+
+            if not self._is_market_open():
+                return
+
+            now = time.time()
+            stall_duration = now - self.streamer.last_tick_time
+
+            # Watchdog 1: Absolute silence from WebSocket wrapper
+            if stall_duration > 15:
+                logger.critical(f"🚨 SYSTEM STALL: No ticks received at all for {stall_duration:.0f}s. Restarting WS.")
                 self.alert(f"⚠️ **DATA STALL**: System blind for {stall_duration:.0f}s. Reconnecting...")
-                # Stop existing ticker before starting new one to prevent thread leaks
                 self.streamer.stop()
+                time.sleep(1)
                 self.streamer.start()
+                return
+
+            # Watchdog 2: Silent Freeze (Exchange timestamps are old despite receiving network pings)
+            # We check NIFTY50 (Token 256265) as our pulse
+            nifty_tick = self.streamer.latest_ticks.get(256265)
+            if nifty_tick and "_recv_time" in nifty_tick:
+                exchange_ts = nifty_tick.get("exchange_timestamp")
+                if exchange_ts:
+                    # exchange_ts is a datetime object from Kite
+                    tick_age = (datetime.now() - exchange_ts).total_seconds()
+                    if tick_age > 10.0:
+                        logger.critical(f"🚨 SILENT FREEZE: Ticks arriving but exchange_timestamp is {tick_age:.0f}s old. Restarting WS.")
+                        self.alert(f"⚠️ **EXCHANGE LAG**: Data delayed by {tick_age:.0f}s. Restarting stream...")
+                        self.streamer.stop()
+                        time.sleep(1)
+                        self.streamer.start()
+
         except Exception as e: logger.error(f"Watchdog failure: {e}")
 
     def force_eval_job(self):

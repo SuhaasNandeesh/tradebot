@@ -23,18 +23,58 @@ class GammaScalper:
         net_delta: The current portfolio delta for the instrument.
         If net_delta is +0.5, we are 'over-long' by 0.5 lots. 
         We need to SELL 0.5 lots of futures to remain neutral.
+
+        Uses Hysteresis Banding to prevent churn:
+        - Trigger hedge only if abs(drift) > 0.40 lots
+        - Clear hedge (un-hedge) only if abs(drift) drops back below 0.10 lots
         """
-        # Institutional Lot Sizes (2026 Standards)
         lot_size = 65 if instrument.upper() == "NIFTY" else 20
-        drift_in_lots = net_delta # Delta 1.0 = 1 lot of underlying
+        drift_in_lots = net_delta
+
+        TRIGGER_THRESHOLD = 0.40
+        CLEAR_THRESHOLD = 0.10
         
-        if abs(drift_in_lots) >= HEDGE_THRESHOLD:
-            logger.info(f"🌀 GAMMA SCALPER: Delta Drift {drift_in_lots:.2f} lots detected in {instrument}.")
-            hedge_order = self._generate_hedge_order(drift_in_lots, instrument)
-            if hedge_order:
-                self._execute_hedge(hedge_order)
-            return hedge_order
+        symbol = f"{instrument}26APR" if instrument == "NIFTY" else f"{instrument}26APR"
+        current_hedge_qty = self.active_hedges.get(symbol, 0)
         
+        # Currently NOT hedged -> Check if we need to trigger a hedge
+        if current_hedge_qty == 0:
+            if abs(drift_in_lots) >= TRIGGER_THRESHOLD:
+                logger.info(f"🌀 GAMMA SCALPER: Delta Drift {drift_in_lots:.2f} lots breached TRIGGER threshold ({TRIGGER_THRESHOLD}).")
+                hedge_order = self._generate_hedge_order(drift_in_lots, instrument)
+                if hedge_order:
+                    self._execute_hedge(hedge_order)
+                return hedge_order
+
+        # Currently HEDGED -> Check if we need to clear the hedge (we are back to neutral natively)
+        elif current_hedge_qty != 0:
+            # We are hedged. The true underlying drift is the current net_delta + our hedge.
+            # Example: We were long 0.5 delta, so we sold 1 lot futures (-1.0). Net is now -0.5.
+            # If the market moves and underlying options delta drops to 0.05,
+            # our true drift is now just 0.05. We should remove the -1.0 hedge.
+
+            # Since net_delta includes the options, we evaluate the options delta alone:
+            options_delta = drift_in_lots
+
+            if abs(options_delta) <= CLEAR_THRESHOLD:
+                logger.info(f"🌀 GAMMA SCALPER: Options Delta {options_delta:.2f} dropped below CLEAR threshold ({CLEAR_THRESHOLD}). Removing hedge.")
+
+                # Reverse the active hedge
+                side = "BUY" if current_hedge_qty < 0 else "SELL"
+                qty = abs(current_hedge_qty)
+
+                clear_order = {
+                    "instrument": instrument,
+                    "type": "FUTURES",
+                    "side": side,
+                    "quantity": qty,
+                    "reason": f"Gamma Scalping: Clearing hedge as options delta returned to {options_delta:.2f}"
+                }
+                self._execute_hedge(clear_order)
+                # Reset tracking immediately
+                self.active_hedges[symbol] = 0
+                return clear_order
+
         return None
 
     def _execute_hedge(self, hedge_order: dict):

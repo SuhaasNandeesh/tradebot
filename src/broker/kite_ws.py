@@ -49,6 +49,11 @@ class KiteStreamer:
         for tick in ticks:
             token = tick.get("instrument_token")
             if token:
+                # Store the tick and its exchange timestamp if available
+                # Zerodha sends timestamp as datetime object in dict
+                tick_time = tick.get("exchange_timestamp")
+                if tick_time:
+                    tick["_recv_time"] = self.last_tick_time
                 self.latest_ticks[token] = tick
                 
         if self.tick_callback:
