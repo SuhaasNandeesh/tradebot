@@ -595,6 +595,7 @@ class Orchestrator:
         self.alert(f"🏁 **Day Over**. Final Realized P&L: `₹{final_pnl:.2f}`. See you tomorrow!")
     def start(self):
         self.singleton_guard()
+        self.execution_agent.resume_working_orders()
         self.streamer.start()
         # Scheduled triggers
         self.scheduler.add_job(self.pre_market_routine, 'cron', day_of_week='mon-fri', hour=8, minute=30, misfire_grace_time=300)

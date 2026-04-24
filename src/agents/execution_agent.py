@@ -89,6 +89,8 @@ class ExecutionAgent:
         self.position_manager = position_manager
         self.streamer = streamer 
         self.spread_builder = SpreadBuilder()
+        from src.memory.state_db import StateDB
+        self.state_db = StateDB()
 
         if self.streamer:
             self.streamer.order_callback = self._handle_order_update
@@ -128,16 +130,22 @@ class ExecutionAgent:
                     limit_price: float = None, trigger_price: float = None,
                     exchange: str = "NFO") -> str:
         if not self.risk_manager.can_trade(): return None
-        if self.paper_trade: return str(uuid.uuid4())
+        if self.paper_trade:
+            order_id = str(uuid.uuid4())
+            self.state_db.save_working_order(order_id, tradingsymbol, transaction_type, quantity, order_type, limit_price)
+            return order_id
         try:
             kite_order_type = getattr(self.kite, f"ORDER_TYPE_{order_type}")
-            return _api_executor.execute(self.kite.place_order,
+            order_id = _api_executor.execute(self.kite.place_order,
                 tradingsymbol=tradingsymbol, exchange=exchange,
                 transaction_type=getattr(self.kite, f"TRANSACTION_TYPE_{transaction_type}"),
                 quantity=quantity, variety=self.kite.VARIETY_REGULAR,
                 order_type=kite_order_type, product=self.kite.PRODUCT_NRML,
                 validity=self.kite.VALIDITY_DAY, price=limit_price, trigger_price=trigger_price
             )
+            if order_id:
+                self.state_db.save_working_order(order_id, tradingsymbol, transaction_type, quantity, order_type, limit_price)
+            return order_id
         except Exception: return None
 
     def place_smart_order(self, tradingsymbol: str, transaction_type: str,
@@ -249,7 +257,10 @@ class ExecutionAgent:
         # 1. Place the primary order
         order_id = self.place_smart_order(tradingsymbol, transaction_type, quantity, instrument_token, exchange)
         logger.info(f"⚡ [ExecutionAgent] Main Order ID: {order_id}")
-        if not order_id: return None
+        if not order_id: return
+
+        # Persist status
+        self.state_db.update_working_order_status(order_id, status)
 
         # 2. Institutional Risk Calculation (ATR-based > %-based)
         if atr:
@@ -342,7 +353,10 @@ class ExecutionAgent:
 
         logger.info(f"⚡ [CHASE EXIT] Placing initial LIMIT for {symbol} at {mid_price}")
         order_id = self.place_order(symbol, side, quantity, order_type="LIMIT", limit_price=mid_price)
-        if not order_id: return None
+        if not order_id: return
+
+        # Persist status
+        self.state_db.update_working_order_status(order_id, status)
 
         # Chase logic
         max_attempts = 3
@@ -428,6 +442,9 @@ class ExecutionAgent:
         
         if not order_id: return
 
+        # Persist status
+        self.state_db.update_working_order_status(order_id, status)
+
         if status == "COMPLETE":
             fill_price = data.get("average_price", 0.0)
             logger.info(f"🎯 ORDER FILL: {symbol} @ {fill_price} (ID: {order_id})")
@@ -496,3 +513,24 @@ class ExecutionAgent:
         except Exception as e:
             logger.error(f"❌ Failed to sync broker positions: {e}")
             return None
+
+    def resume_working_orders(self):
+        """Called on startup to resume any interrupted limit chases."""
+        working_orders = self.state_db.get_all_working_orders()
+        if not working_orders:
+            logger.info("✅ No active working orders to resume.")
+            return
+
+        logger.warning(f"🔄 Found {len(working_orders)} interrupted working orders. Attempting to resume/cancel.")
+        for order in working_orders:
+            order_id = order["order_id"]
+            logger.info(f"🔄 Resuming tracking for order {order_id} ({order['symbol']})")
+            # In a full implementation, you'd re-spawn a thread to continue the `_chase_exit_order` loop here.
+            # For safety on startup, we usually just cancel hanging limits and let the position manager re-evaluate.
+            if not self.paper_trade and self.kite:
+                try:
+                    _api_executor.execute(self.kite.cancel_order, "regular", order_id)
+                    logger.info(f"✅ Cancelled hanging order {order_id} on startup for safety.")
+                    self.state_db.update_working_order_status(order_id, "CANCELLED")
+                except Exception as e:
+                    logger.error(f"❌ Failed to cancel hanging order {order_id} on startup: {e}")

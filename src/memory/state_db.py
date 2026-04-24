@@ -42,6 +42,21 @@ class StateDB:
                     )
                 """)
                 
+
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS working_orders (
+                        order_id TEXT PRIMARY KEY,
+                        symbol TEXT NOT NULL,
+                        transaction_type TEXT NOT NULL,
+                        quantity INTEGER NOT NULL,
+                        order_type TEXT NOT NULL,
+                        price REAL,
+                        status TEXT DEFAULT 'OPEN',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        metadata_json TEXT
+                    )
+                """)
+
                 # Dynamic migration
                 columns = [c[1] for c in cursor.execute("PRAGMA table_info(open_positions)").fetchall()]
                 if "type" not in columns:
@@ -159,6 +174,67 @@ class StateDB:
                 return positions
             except Exception as e:
                 logger.error(f"DB Load failed: {e}")
+                return []
+            finally:
+                conn.close()
+
+
+    # ── Working Orders Management ─────────────────────────────────────────────
+
+    def save_working_order(self, order_id: str, symbol: str, transaction_type: str, quantity: int, order_type: str, price: float = None, metadata: dict = None):
+        with self._lock:
+            try:
+                conn = sqlite3.connect(self.db_path, timeout=30)
+                cursor = conn.cursor()
+                meta_str = json.dumps(metadata) if metadata else "{}"
+                cursor.execute("""
+                    INSERT OR REPLACE INTO working_orders
+                    (order_id, symbol, transaction_type, quantity, order_type, price, metadata_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (order_id, symbol, transaction_type, quantity, order_type, price, meta_str))
+                conn.commit()
+            except Exception as e:
+                logger.error(f"Failed to save working order {order_id} to DB: {e}")
+            finally:
+                conn.close()
+
+    def update_working_order_status(self, order_id: str, status: str):
+        with self._lock:
+            try:
+                conn = sqlite3.connect(self.db_path, timeout=30)
+                cursor = conn.cursor()
+                cursor.execute("UPDATE working_orders SET status = ? WHERE order_id = ?", (status, order_id))
+                if status in ("COMPLETE", "CANCELLED", "REJECTED"):
+                    # Cleanup terminal states to keep table small
+                    cursor.execute("DELETE FROM working_orders WHERE order_id = ?", (order_id,))
+                conn.commit()
+            except Exception as e:
+                logger.error(f"Failed to update working order status {order_id}: {e}")
+            finally:
+                conn.close()
+
+    def get_all_working_orders(self) -> list:
+        with self._lock:
+            try:
+                conn = sqlite3.connect(self.db_path, timeout=30)
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM working_orders WHERE status NOT IN ('COMPLETE', 'CANCELLED', 'REJECTED')")
+                rows = cursor.fetchall()
+                orders = []
+                for row in rows:
+                    orders.append({
+                        "order_id": row[0],
+                        "symbol": row[1],
+                        "transaction_type": row[2],
+                        "quantity": row[3],
+                        "order_type": row[4],
+                        "price": row[5],
+                        "status": row[6],
+                        "metadata": json.loads(row[8]) if row[8] else {}
+                    })
+                return orders
+            except Exception as e:
+                logger.error(f"Failed to fetch working orders: {e}")
                 return []
             finally:
                 conn.close()

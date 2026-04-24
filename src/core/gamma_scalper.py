@@ -30,9 +30,48 @@ class GammaScalper:
         
         if abs(drift_in_lots) >= HEDGE_THRESHOLD:
             logger.info(f"🌀 GAMMA SCALPER: Delta Drift {drift_in_lots:.2f} lots detected in {instrument}.")
-            return self._generate_hedge_order(drift_in_lots, instrument)
+            hedge_order = self._generate_hedge_order(drift_in_lots, instrument)
+            if hedge_order:
+                self._execute_hedge(hedge_order)
+            return hedge_order
         
         return None
+
+    def _execute_hedge(self, hedge_order: dict):
+        """
+        Automatically executes the futures hedge via the ExecutionAgent.
+        """
+        instrument = hedge_order["instrument"]
+        side = hedge_order["side"]
+        qty = hedge_order["quantity"]
+
+        # Determine futures symbol (Assuming front-month future)
+        # In a real environment, you'd dynamically fetch the current month's expiry.
+        # For this prototype, we use a placeholder that the execution agent parses or overrides if paper trading.
+        symbol = f"{instrument}26APR" if instrument == "NIFTY" else f"{instrument}26APR"
+
+        logger.warning(f"🛡️ Executing automated delta-hedge: {side} {qty} lots of {symbol}")
+
+        try:
+            # We treat the hedge like a standard market order, as delta risk must be covered instantly
+            order_id = self.execution_agent.place_order(
+                tradingsymbol=symbol,
+                transaction_type=side,
+                quantity=qty,
+                order_type="MARKET",
+                exchange="NFO"
+            )
+
+            if order_id:
+                logger.info(f"✅ Hedge executed. Order ID: {order_id}")
+                # Track the active hedge so we don't double-hedge
+                current_qty = self.active_hedges.get(symbol, 0)
+                self.active_hedges[symbol] = current_qty + (qty if side == "BUY" else -qty)
+            else:
+                logger.error("❌ Failed to place hedge order.")
+        except Exception as e:
+            logger.error(f"❌ Exception executing hedge: {e}")
+
 
     def _generate_hedge_order(self, drift_lots: float, instrument: str):
         """

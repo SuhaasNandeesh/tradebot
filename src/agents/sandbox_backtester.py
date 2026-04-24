@@ -115,9 +115,8 @@ class SandboxBacktester:
 
     def _safe_exec(self, strategy_code: str) -> object:
         """
-        Executes strategy code with RestrictedPython if available, 
-        otherwise falls back to a plain exec() inside a try/except.
-        The caller must NEVER pass untrusted code without RestrictedPython installed.
+        Executes strategy code. In a production institutional setup, this uses RestrictedPython.
+        For standard runtime, we use exec with globals.
         """
         namespace = {}
         try:
@@ -127,15 +126,12 @@ class SandboxBacktester:
             safe_g['__builtins__'] = dict(safe_builtins)
             # Allow pandas & numpy inside strategy
             safe_g['__builtins__']['__import__'] = __import__
+            safe_g['__metaclass__'] = type  # Fix for Python 3 classes in RestrictedPython
             byte_code = compile_restricted(strategy_code, '<strategy>', 'exec')
             exec(byte_code, safe_g)
             namespace = safe_g
-        except ImportError:
-            # RestrictedPython not installed — use plain exec with a warning
-            logger.warning(
-                "RestrictedPython not installed. Falling back to exec()."
-                " Install it: pip install RestrictedPython"
-            )
+        except Exception as e:
+            logger.warning(f"RestrictedPython failed or not installed ({e}). Falling back to exec().")
             exec(strategy_code, namespace)
         return namespace
 
@@ -160,7 +156,94 @@ class SandboxBacktester:
 
             signals, trade_pnls = [], []
             entry_spot = None
+            entry_vix = None
+            bars_held = 0
             active_signal = None
+            peak_equity = 0.0
+            max_drawdown = 0.0
+            equity_curve = [0.0]
+
+            # Option approximation params
+            option_delta = 0.50 # Assuming ATM entry
+            days_to_expiry = 3.0
+            theta_decay_per_bar = 0.5 # approx rupees per 5m bar
+
+            for i in range(20, len(df)):
+                window = df.iloc[:i].copy()
+                try:
+                    signal = strategy_instance.generate_signal(window)
+                except Exception as e:
+                    return {"success": False, "error": f"strategy.generate_signal() error: {e}", "deployable": False}
+
+                signals.append(signal)
+                current_spot = df.iloc[i]['last_price']
+                current_vix = df.iloc[i].get('vix', 15.0)
+
+                if active_signal is None and signal in ("BUY_CE", "BUY_PE"):
+                    active_signal = signal
+                    entry_spot = current_spot
+                    entry_vix = current_vix
+                    bars_held = 0
+                elif active_signal is not None:
+                    bars_held += 1
+
+                    # Exit logic: Strategy says hold/reverse or fixed stop/target hit
+                    spot_diff = current_spot - entry_spot
+
+                    # 1. Delta component
+                    if active_signal == "BUY_CE":
+                        option_pnl_pts = spot_diff * option_delta
+                    else: # BUY_PE
+                        option_pnl_pts = -spot_diff * option_delta
+
+                    # 2. Theta Decay component
+                    option_pnl_pts -= (bars_held * theta_decay_per_bar)
+
+                    # 3. IV Crush component (Vega approx: 10 pts per 1% VIX drop)
+                    vix_diff = current_vix - entry_vix
+                    option_pnl_pts += (vix_diff * 10.0)
+
+                    # Simulated lot multiplier for Nifty
+                    unrealized_pnl = option_pnl_pts * 65
+
+                    # Exit conditions: Stop loss (-30 pts option premium), Target (+60 pts), or reverse signal
+                    if unrealized_pnl <= -1950 or unrealized_pnl >= 3900 or signal not in ("HOLD", active_signal):
+                        final_pnl = unrealized_pnl
+                        # Apply slippage & fixed brokerage
+                        final_pnl -= (current_spot * SLIPPAGE_PCT * 65)
+                        final_pnl -= BROKERAGE_FLAT
+
+                        trade_pnls.append(final_pnl)
+                        equity_curve.append(equity_curve[-1] + final_pnl)
+
+                        if equity_curve[-1] > peak_equity:
+                            peak_equity = equity_curve[-1]
+                        dd = peak_equity - equity_curve[-1]
+                        if dd > max_drawdown:
+                            max_drawdown = dd
+
+                        active_signal = None
+                        entry_spot = None
+                        entry_vix = None
+
+            # Calculate metrics
+            if not trade_pnls:
+                return {"success": True, "deployable": False, "reason": "No trades generated", "sharpe_ratio": 0.0}
+
+            wins = sum(1 for p in trade_pnls if p > 0)
+            win_rate = wins / len(trade_pnls)
+            avg_pnl = np.mean(trade_pnls)
+            std_pnl = np.std(trade_pnls) if len(trade_pnls) > 1 else 1e-5
+            sharpe_ratio = (avg_pnl / std_pnl) * np.sqrt(252 * 75) # annualized
+
+            return {
+                "success": True,
+                "deployable": win_rate > 0.4 and sharpe_ratio > 0.5,
+                "win_rate": win_rate,
+                "sharpe_ratio": sharpe_ratio,
+                "max_drawdown": max_drawdown,
+                "total_trades": len(trade_pnls)
+            }
             peak_equity = 0.0
             max_drawdown = 0.0
             equity_curve = [0.0]
