@@ -17,11 +17,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("E2E_Test")
 
 class TestE2EIntegration(unittest.TestCase):
+    @patch('main.Orchestrator.check_auth')
     @patch('src.agents.execution_agent.KiteConnect')
     @patch('main.KiteStreamer')
     @patch('main.TelegramAgent')
     @patch('main.load_dotenv')
-    def setUp(self, mock_dotenv, mock_telegram, mock_streamer, mock_kite):
+    def setUp(self, mock_dotenv, mock_telegram, mock_streamer, mock_kite, mock_check_auth):
         # 1. Setup Environment Mocks
         os.environ["GOOGLE_API_KEY"] = "fake_key"
         os.environ["KITE_API_KEY"] = "fake_key"

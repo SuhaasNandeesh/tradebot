@@ -146,6 +146,7 @@ class SandboxBacktester:
         Executes strategy code and simulates trades over historical OHLCV data.
         Computes real PnL with slippage + brokerage, Sharpe ratio, win rate,
         max drawdown, and applies a multi-factor approval gate.
+        Now includes approximate Option Greeks (Delta, Theta) and IV Crush logic.
         """
         logger.info("Starting Sandbox Backtest for generated strategy...")
         try:
@@ -158,8 +159,73 @@ class SandboxBacktester:
             df = self._get_historical_data()
 
             signals, trade_pnls = [], []
-            entry_price = None
+            entry_spot = None
             active_signal = None
+            peak_equity = 0.0
+            max_drawdown = 0.0
+            equity_curve = [0.0]
+
+            # Option approximation params
+            option_delta = 0.50 # Assuming ATM entry
+            days_to_expiry = 3.0
+            theta_decay_per_bar = 0.5 # approx rupees per 5m bar
+
+            for i in range(20, len(df)):
+                window = df.iloc[:i].copy()
+                try:
+                    signal = strategy_instance.generate_signal(window)
+                except Exception as e:
+                    return {"success": False, "error": f"strategy.generate_signal() error: {e}", "deployable": False}
+
+                signals.append(signal)
+                current_spot = df.iloc[i]['last_price']
+                current_vix = df.iloc[i].get('vix', 15.0)
+
+                if active_signal is None and signal in ("BUY_CE", "BUY_PE"):
+                    active_signal = signal
+                    entry_spot = current_spot
+                    entry_vix = current_vix
+                    bars_held = 0
+                elif active_signal is not None:
+                    bars_held += 1
+
+                    # Exit logic: Strategy says hold/reverse or fixed stop/target hit
+                    spot_diff = current_spot - entry_spot
+
+                    # 1. Delta component
+                    if active_signal == "BUY_CE":
+                        option_pnl_pts = spot_diff * option_delta
+                    else: # BUY_PE
+                        option_pnl_pts = -spot_diff * option_delta
+
+                    # 2. Theta Decay component
+                    option_pnl_pts -= (bars_held * theta_decay_per_bar)
+
+                    # 3. IV Crush component (Vega approx: 10 pts per 1% VIX drop)
+                    vix_diff = current_vix - entry_vix
+                    option_pnl_pts += (vix_diff * 10.0)
+
+                    # Simulated lot multiplier for Nifty
+                    unrealized_pnl = option_pnl_pts * 65
+
+                    # Exit conditions: Stop loss (-30 pts option premium), Target (+60 pts), or reverse signal
+                    if unrealized_pnl <= -1950 or unrealized_pnl >= 3900 or signal not in ("HOLD", active_signal):
+                        final_pnl = unrealized_pnl
+                        # Apply slippage & fixed brokerage
+                        final_pnl -= (current_spot * SLIPPAGE_PCT * 65)
+                        final_pnl -= BROKERAGE_FLAT
+
+                        trade_pnls.append(final_pnl)
+                        equity_curve.append(equity_curve[-1] + final_pnl)
+
+                        if equity_curve[-1] > peak_equity:
+                            peak_equity = equity_curve[-1]
+                        dd = peak_equity - equity_curve[-1]
+                        if dd > max_drawdown:
+                            max_drawdown = dd
+
+                        active_signal = None
+                        entry_spot = None
             peak_equity = 0.0
             max_drawdown = 0.0
             equity_curve = [0.0]
